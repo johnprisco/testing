@@ -20,7 +20,8 @@ let package = Package(
         .target(
             name: "RecipeExtraction",
             dependencies: ["SwiftSoup"],
-            path: "RecipeApp/Services"
+            path: "RecipeApp",
+            sources: ["Models", "Services"]
         ),
         .testTarget(
             name: "RecipeExtractionTests",

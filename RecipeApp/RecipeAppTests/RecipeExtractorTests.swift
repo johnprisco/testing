@@ -188,4 +188,24 @@ struct RecipeExtractorTests {
             _ = try await extractor.extractRecipe(from: "not a valid url")
         }
     }
+
+    @Test("Can disable ML fallback")
+    func canDisableMLFallback() async throws {
+        let extractor = RecipeExtractor(useMLFallback: false)
+
+        // ML should report as unavailable when disabled
+        let isAvailable = await extractor.isMLAvailable
+        #expect(isAvailable == false)
+    }
+
+    @Test("Extraction source includes all three options")
+    func allExtractionSources() {
+        // Verify all source types exist
+        let sources: [RecipeExtractor.ExtractionSource] = [
+            .jsonLD,
+            .htmlParsing,
+            .onDeviceML
+        ]
+        #expect(sources.count == 3)
+    }
 }

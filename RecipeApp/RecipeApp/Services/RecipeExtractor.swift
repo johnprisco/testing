@@ -7,6 +7,7 @@ public actor RecipeExtractor {
     private let jsonLDParser: JSONLDRecipeParser
     private let htmlParser: HTMLRecipeParser
     private let urlSession: URLSession
+    private let useMLFallback: Bool
 
     public enum ExtractionError: Error, LocalizedError {
         case invalidURL
@@ -37,18 +38,37 @@ public actor RecipeExtractor {
     public enum ExtractionSource: Sendable {
         case jsonLD        // Structured data (most reliable)
         case htmlParsing   // Heuristic HTML parsing
+        case onDeviceML    // Foundation Models extraction
     }
 
     public enum ExtractionConfidence: Sendable {
         case high    // JSON-LD with complete data
-        case medium  // JSON-LD partial or good HTML match
-        case low     // HTML heuristics only
+        case medium  // JSON-LD partial, good HTML match, or ML extraction
+        case low     // Minimal data extracted
     }
 
-    public init(urlSession: URLSession = .shared) {
+    /// Initialize the recipe extractor
+    /// - Parameters:
+    ///   - urlSession: URL session for network requests
+    ///   - useMLFallback: Whether to use on-device ML as final fallback (iOS 18+)
+    public init(urlSession: URLSession = .shared, useMLFallback: Bool = true) {
         self.jsonLDParser = JSONLDRecipeParser()
         self.htmlParser = HTMLRecipeParser()
         self.urlSession = urlSession
+        self.useMLFallback = useMLFallback
+    }
+
+    /// Check if on-device ML extraction is available
+    public var isMLAvailable: Bool {
+        get async {
+            guard useMLFallback else { return false }
+
+            if #available(iOS 18.0, macOS 15.0, *) {
+                let parser = MLRecipeParser()
+                return await parser.isAvailable
+            }
+            return false
+        }
     }
 
     /// Extract a recipe from a URL
@@ -59,7 +79,7 @@ public actor RecipeExtractor {
         let html = try await fetchHTML(from: url)
 
         // Try extraction strategies in order of reliability
-        return try extractRecipe(from: html, sourceURL: url)
+        return try await extractRecipe(from: html, sourceURL: url)
     }
 
     /// Extract a recipe from raw HTML content
@@ -67,7 +87,7 @@ public actor RecipeExtractor {
     ///   - html: The HTML content to parse
     ///   - sourceURL: Optional source URL for the recipe
     /// - Returns: Extraction result with recipe, source, and confidence
-    public func extractRecipe(from html: String, sourceURL: URL? = nil) throws -> ExtractionResult {
+    public func extractRecipe(from html: String, sourceURL: URL? = nil) async throws -> ExtractionResult {
         // Strategy 1: Try JSON-LD structured data (most reliable)
         if let recipe = try? jsonLDParser.extractRecipe(from: html, sourceURL: sourceURL) {
             let confidence = assessJSONLDConfidence(recipe)
@@ -88,10 +108,42 @@ public actor RecipeExtractor {
             )
         }
 
+        // Strategy 3: Fall back to on-device ML (iOS 18+)
+        if useMLFallback {
+            if let result = try await extractWithML(html: html, sourceURL: sourceURL) {
+                return result
+            }
+        }
+
         throw ExtractionError.noRecipeFound
     }
 
-    // MARK: - Private Methods
+    // MARK: - ML Extraction
+
+    private func extractWithML(html: String, sourceURL: URL?) async throws -> ExtractionResult? {
+        guard #available(iOS 18.0, macOS 15.0, *) else {
+            return nil
+        }
+
+        let mlParser = MLRecipeParser()
+
+        guard await mlParser.isAvailable else {
+            return nil
+        }
+
+        if let recipe = try await mlParser.extractRecipe(fromHTML: html, sourceURL: sourceURL) {
+            let confidence = assessMLConfidence(recipe)
+            return ExtractionResult(
+                recipe: recipe,
+                source: .onDeviceML,
+                confidence: confidence
+            )
+        }
+
+        return nil
+    }
+
+    // MARK: - Network
 
     private func fetchHTML(from url: URL) async throws -> String {
         var request = URLRequest(url: url)
@@ -135,6 +187,8 @@ public actor RecipeExtractor {
         }
     }
 
+    // MARK: - Confidence Assessment
+
     private func assessJSONLDConfidence(_ recipe: ExtractedRecipe) -> ExtractionConfidence {
         var score = 0
 
@@ -167,6 +221,22 @@ public actor RecipeExtractor {
 
         // HTML parsing is inherently less reliable
         if score >= 4 {
+            return .medium
+        } else {
+            return .low
+        }
+    }
+
+    private func assessMLConfidence(_ recipe: ExtractedRecipe) -> ExtractionConfidence {
+        var score = 0
+
+        // ML extraction can be quite good when it works
+        if !recipe.title.isEmpty { score += 2 }
+        if recipe.ingredients.count >= 3 { score += 2 }
+        if recipe.instructions.count >= 2 { score += 2 }
+
+        // ML is less reliable than JSON-LD but can be better than HTML heuristics
+        if score >= 5 {
             return .medium
         } else {
             return .low
